@@ -17,8 +17,13 @@
  */
 package org.apache.beam.runners.flink.translation.types;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.util.Base64;
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
 import org.apache.beam.runners.flink.FlinkPipelineOptions;
 import org.apache.beam.runners.flink.translation.wrappers.DataInputViewWrapper;
@@ -28,10 +33,8 @@ import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerConfigSnapshot;
 import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
-import org.apache.flink.core.io.VersionedIOReadableWritable;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -158,20 +161,51 @@ public class CoderTypeSerializer<T> extends TypeSerializer<T> {
     return new LegacySnapshot<>(this);
   }
 
-  /** A legacy snapshot which does not care about schema compatibility. */
-  public static class LegacySnapshot<T> extends TypeSerializerConfigSnapshot<T> {
+  /**
+   * A legacy snapshot which does not care about schema compatibility.
+   */
+  public static class LegacySnapshot<T> implements TypeSerializerSnapshot<T> {
 
-    /** Needs to be public to work with {@link VersionedIOReadableWritable}. */
+    private CoderTypeSerializer<T> serializer;
+
+    /** Needs to be public to work with {@link TypeSerializerSnapshot}. */
     public LegacySnapshot() {}
 
     public LegacySnapshot(CoderTypeSerializer<T> serializer) {
-      setPriorSerializer(serializer);
+      this.serializer = serializer;
     }
 
     @Override
-    public int getVersion() {
-      // We always return the same version
-      return 1;
+    public int getCurrentVersion() {
+      return 2;
+    }
+
+    @Override
+    public void writeSnapshot(final DataOutputView out) throws IOException {
+      ByteArrayOutputStream bos = new ByteArrayOutputStream();
+      ObjectOutputStream oos = new ObjectOutputStream(bos);
+      oos.writeObject(serializer);
+      oos.flush();
+      oos.close();
+      String written = Base64.getEncoder().encodeToString(bos.toByteArray());
+      out.writeUTF(written);
+    }
+
+    @Override
+    public void readSnapshot(final int readVersion, final DataInputView in, final ClassLoader userCodeClassLoader) throws IOException {
+      try {
+        String read = in.readUTF();
+        ByteArrayInputStream bis = new ByteArrayInputStream(Base64.getDecoder().decode(read));
+        ObjectInputStream bos = new ObjectInputStream(bis);
+        this.serializer = (CoderTypeSerializer<T>) bos.readObject();
+      } catch (ClassNotFoundException e) {
+        throw new RuntimeException(e);
+      }
+    }
+
+    @Override
+    public TypeSerializer<T> restoreSerializer() {
+      return serializer;
     }
 
     @Override
